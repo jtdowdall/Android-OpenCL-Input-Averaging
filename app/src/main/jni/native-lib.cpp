@@ -118,9 +118,6 @@ GpuProperties gpu;
 /** Global array that maintains input average for GPU computation. */
 W wGpu;
 
-/** Global array that maintains input average for CPU computation. */
-float *wCpu;
-
 /** Global array of input vector. */
 W inputVector;
 
@@ -412,7 +409,18 @@ Java_com_example_jonny_updateweights_MainActivity_initOpenCl(JNIEnv *env, jobjec
      * Also consider looking into a dedicated chapter in the OpenCL specification
      * for more information on applicable alternatives and options.
      */
-    err = clBuildProgram(cl.program, 0, 0, NULL, 0, 0);
+    // Optimization flags used in build process
+    char *options = "-cl-fast-relaxed-math";
+
+    err = clBuildProgram
+            (
+                    cl.program, // cl_program program
+                    0, // cl_uint num_devices
+                    NULL, // cl_device_id *device_list; if NULL, builds for all devices in program
+                    options, // char *options
+                    0,
+                    0
+            );
     SAMPLE_CHECK_ERRORS(err);
     if(err == CL_BUILD_PROGRAM_FAILURE) {
         size_t log_length = 0;
@@ -570,11 +578,6 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
             );
     SAMPLE_CHECK_ERRORS(err);
 
-    // Create CPU array
-    wCpu = new float[wGpu.size];
-    std::fill(wCpu, wCpu + wGpu.size, 0);
-    LOGD("%f",wCpu[0]);
-
     return (int) wGpu.size;
 
 }
@@ -583,19 +586,46 @@ extern "C" JNIEXPORT int
 Java_com_example_jonny_updateweights_MainActivity_updateWeights(JNIEnv *env, jobject instance,
                                                                    jfloatArray input, jint t) {
     cl_int err;
-
     // Create buffer for input vector
-    inputVector.pointer = (float *) env->GetFloatArrayElements(input, 0);
+
+    //LOGD("%f", inputVector.pointer[0]);
     inputVector.buffer = clCreateBuffer
             (
                     cl.context,
-                    CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-                    inputVector.size * sizeof(float),
-                    inputVector.pointer,
+                    CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR,
+                    inputVector.size * sizeof(jfloat),
+                    NULL,
                     &err
             );
     SAMPLE_CHECK_ERRORS(err);
-
+    inputVector.pointer = (float*)clEnqueueMapBuffer
+            (
+                    cl.queue, // command_queue
+                    inputVector.buffer, // buffer
+                    true, // blocking_map
+                    CL_MAP_WRITE, // maps_flags
+                    0, // offset
+                    inputVector.size * sizeof(float), // cb
+                    0, // num_events_in_wait_list
+                    NULL, // *event_wait_list
+                    NULL, // *event
+                    &err // *errcode_ret
+            );
+    float  *temp = env->GetFloatArrayElements(input, 0);
+    for (int i = 0; i < inputVector.size; ++i)
+    {
+        inputVector.pointer[i] = temp[i];
+    }
+    SAMPLE_CHECK_ERRORS(err);
+     err = clEnqueueUnmapMemObject
+            (
+                    cl.queue,
+                    inputVector.buffer,
+                    inputVector.pointer,
+                    0,
+                    NULL,
+                    NULL
+            );
     // Set kernel arguments
     err = clSetKernelArg
             (
@@ -628,14 +658,16 @@ Java_com_example_jonny_updateweights_MainActivity_updateWeights(JNIEnv *env, job
                     cl.updateWeights, // kernel
                     3, // work_dim
                     NULL, // *global_work_offset
-                    globalDimensions, // *globa_work_size
+                    globalDimensions, // *global_work_size
                     NULL, // *local_work_size
                     0, // num_events_in_wait_list
                     NULL, // *event_wait_list
                     NULL // *event
             );
-    SAMPLE_CHECK_ERRORS(err);
 
+    SAMPLE_CHECK_ERRORS(err);
+    err = clReleaseMemObject(inputVector.buffer);
+    SAMPLE_CHECK_ERRORS(err);
     return 1;
 
 }
@@ -664,10 +696,11 @@ Java_com_example_jonny_updateweights_MainActivity_getGpuW(JNIEnv *env, jobject i
 
     return result;
 }
-
+/*
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobject instance) {
+Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobject instance, jfloatArray w) {
 
+    wCpu = env->GetFloatArrayElements(w, 0);
     cl_int err;
     wGpu.pointer = (float*)clEnqueueMapBuffer
             (
@@ -704,8 +737,6 @@ Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobjec
     result += "Results:\n";
     result += std::to_string(wGpu.size) + " elements were updated " +
             std::to_string(t-1) + " time(s) to maintain input averages.\n";
-    result += "\nCPU: " + std::to_string(cpuTime) + " ms";
-    result += "\nGPU: " + std::to_string(gpuTime) + " ms";
     result += "\nRuntime reduction: " + std::to_string((double)(1 - gpuTime/cpuTime) * 100) + "%\n";
     result += "\nGPU relative error to CPU: " +  std::to_string(relativeError*100) + "%";
     result += "\nwCpu[0]: " + std::to_string(wCpu[0]);
@@ -714,4 +745,4 @@ Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobjec
     result += "\nwGpu[1]: " + std::to_string(wGpu.pointer[1]);
 
     return env->NewStringUTF(result.c_str());
-}
+}*/

@@ -25,6 +25,10 @@ import java.io.OutputStream;
 import java.nio.IntBuffer;
 import java.util.Random;
 
+import static java.lang.Math.abs;
+import static java.lang.Math.pow;
+import static java.lang.Math.sqrt;
+
 public class MainActivity extends AppCompatActivity {
 
     /** Maximum size of W and input vectors */
@@ -38,6 +42,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** Array storing input averages for CPU computation */
     public float mCpuW[];
+
+    /** Array storing input averages for CPU computation */
+    public float mGpuW[];
 
 
     @Override
@@ -79,6 +86,10 @@ public class MainActivity extends AppCompatActivity {
                 // Initialize W on GPU and set size of vector
                 mSizeW = initW();
 
+                // Allocate space on CPU in order to check GPU correctness
+                // once computation is complete
+                mGpuW = new float[mSizeW];
+
                 // Initialize input and W on CPU
                 mInput = new float[mSizeW];
 
@@ -112,28 +123,45 @@ public class MainActivity extends AppCompatActivity {
                         int finalTime = Integer.parseInt(timeInput.getText().toString());
                         double cpuTime = 0;
                         double gpuTime = 0;
-                        long start, end;
+                        long cpuStart, cpuEnd, gpuStart, gpuEnd;
                         for (int time = 1; time <= finalTime; ++time ) {
                             // Create mock input using random array of floats
                             randomizeFloats(mInput);
 
                             // Update CPU weights and keep track of runtime
-                            start = System.nanoTime();
-                            cpuUpdateWeights(time);
-                            end = System.nanoTime();
-                            cpuTime += (double)(end - start) / 1000000;
+                            cpuStart = System.nanoTime();
+                            updateWeights(mCpuW, mInput, time);
+                            cpuEnd = System.nanoTime();
+                            cpuTime += (double)(cpuEnd - cpuStart) / 1000000;
 
                             // Update GPU weights and keep track of runtime
-                            start = System.nanoTime();
+                            gpuStart = System.nanoTime();
                             updateWeights(mInput, time);
-                            end = System.nanoTime();
-                            gpuTime += (double)(end - start) / 1000000;
+                            gpuEnd = System.nanoTime();
+                            gpuTime += (double)(gpuEnd - gpuStart) / 1000000;
                         }
 
-                        //String result = getResults();
+                        // Retreive GPU w array in order to check results
+                        mGpuW = getGpuW();
 
-                        String result = "CPU: " + Double.toString(cpuTime) + " ms\n" +
-                                "GPU: " + Double.toString(gpuTime) + " ms";
+                        double relativeError = computeRelativeError(mCpuW, mGpuW);
+
+                        // Output results
+                        String result = "Results:\n";
+                        result += "CPU Runtime: " + Double.toString(cpuTime) + " ms\n";
+                        result += "GPU Runtime: " + Double.toString(gpuTime) + " ms\n";
+                        result += "\nRuntime reduction: " +
+                                Double.toString((double)(1 - gpuTime/cpuTime) * 100) + "%\n";
+
+                        result += "\nGPU relative error to CPU: " +
+                                Double.toString(relativeError*100) + "%";
+
+                        // Print first 10 weights in each vector
+                        for (int i = 0; i < 10; ++i)
+                        {
+                            result += String.format("\n\nmCpuW[%d]: %f", i, mCpuW[i]);
+                            result += String.format("\nmGpuW[%d]: %f", i, mGpuW[i]);
+                        }
                         ((TextView) findViewById(R.id.result)).setText(result);
                     }
                 });
@@ -225,10 +253,12 @@ public class MainActivity extends AppCompatActivity {
     /**
      * @return The array W that was used in the GPU computation.
      */
-    public native String getResults();
+    public native float[] getGpuW();
 
-    /*
-	 * loads the kernel into the app_execdir
+    /**
+	 * Loads the kernel into the app_execdir.
+     *
+     * @param f the filename of the kernel
 	 */
     private void copyFile(final String f)
     {
@@ -265,12 +295,49 @@ public class MainActivity extends AppCompatActivity {
             input[i] = rand.nextFloat();
         }
     }
-    private void cpuUpdateWeights(int t)
+
+    /**
+     * Updates weights with new input in order to maintain input average
+     *
+     * @param weights Array of floats containing current input average
+     * @param   input Array of floats representing new input to weights
+     * @param    time Current iteration of input for proper average maintenance
+     */
+    private void updateWeights(float[] weights, float input[], float time)
     {
-        for (int i = 0; i < mSizeW; ++i) {
-            mCpuW[i] = ((float)(t - 1) / t * mCpuW[i]) + ((float)1 / t * mInput[i]);
+        for (int i = 0; i < weights.length; ++i) {
+            weights[i] = ((float)(time - 1) / time * mCpuW[i]) + ((float)1 / time * input[i]);
         }
     }
+
+    /**
+     * Compute error of a vector of floats relative to another vector of floats
+     *
+     * @param originalVector The original vector used as control
+     * @param  compareVector The vector we would like to compute the error of
+     * @return relativeError The error of compareVector relative to originalVector
+     */
+    private double computeRelativeError(float[] originalVector, float[] compareVector)
+    {
+        // Compute euclidean norm of original vector and difference vector
+        double originalNorm = 0;
+        double differenceNorm = 0;
+        float difference;
+        for (int i = 0; i < originalVector.length; ++i)
+        {
+            originalNorm += pow(originalVector[i], 2);
+
+            difference = abs(originalVector[i] - compareVector[i]);
+            differenceNorm += pow(difference,2 );
+        }
+        originalNorm = sqrt(originalNorm);
+        differenceNorm = sqrt(differenceNorm);
+
+        // Compute relative error: ratio between euclidean norms
+        double relativeError = differenceNorm / originalNorm;
+        return relativeError;
+    }
+
     // Used to load the 'native-lib' and 'OpenCL' libraries on application startup.
     static {
         System.loadLibrary("native-lib");
