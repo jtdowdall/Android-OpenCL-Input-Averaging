@@ -6,11 +6,10 @@
 package com.example.jonny.updateweights;
 
 import android.content.DialogInterface;
+import android.os.Bundle;
 import android.support.v7.app.AlertDialog;
 import android.support.v7.app.AppCompatActivity;
-import android.os.Bundle;
 import android.text.InputType;
-import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -22,7 +21,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.IntBuffer;
 import java.util.Random;
 
 import static java.lang.Math.abs;
@@ -88,12 +86,12 @@ public class MainActivity extends AppCompatActivity {
 
                 // Allocate space on CPU in order to check GPU correctness
                 // once computation is complete
-                mGpuW = new float[mSizeW];
+               /* mGpuW = new float[mSizeW];
 
                 // Initialize input and W on CPU
                 mInput = new float[mSizeW];
 
-                mCpuW = new float[mSizeW];
+                mCpuW = new float[mSizeW];*/
 
                 // Report size of vectors
                 String output = "Array Initialization Complete.\n" +
@@ -121,7 +119,7 @@ public class MainActivity extends AppCompatActivity {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         int finalTime = Integer.parseInt(timeInput.getText().toString());
-                        double cpuTime = 0;
+                        /*double cpuTime = 0;
                         double gpuTime = 0;
                         long cpuStart, cpuEnd, gpuStart, gpuEnd;
                         for (int time = 1; time <= finalTime; ++time ) {
@@ -142,7 +140,7 @@ public class MainActivity extends AppCompatActivity {
                         }
 
                         // Retreive GPU w array in order to check results
-                        mGpuW = getGpuW();
+                        getGpuW(mGpuW);
 
                         double relativeError = computeRelativeError(mCpuW, mGpuW);
 
@@ -161,7 +159,9 @@ public class MainActivity extends AppCompatActivity {
                         {
                             result += String.format("\n\nmCpuW[%d]: %f", i, mCpuW[i]);
                             result += String.format("\nmGpuW[%d]: %f", i, mGpuW[i]);
-                        }
+                        }*/
+                        updateWeights(finalTime);
+                        String result = getResults();
                         ((TextView) findViewById(R.id.result)).setText(result);
                     }
                 });
@@ -248,12 +248,12 @@ public class MainActivity extends AppCompatActivity {
      *
      * @param time  How many iterations to generate input and update weights
      */
-    public native int updateWeights(float[] input, int time);
+    public native int updateWeights(int time);
 
     /**
      * @return The array W that was used in the GPU computation.
      */
-    public native float[] getGpuW();
+    public native void getGpuW(float[] gpuW);
 
     /**
 	 * Loads the kernel into the app_execdir.
@@ -292,7 +292,7 @@ public class MainActivity extends AppCompatActivity {
 
         for (int i = 0; i < mSizeW; ++i)
         {
-            input[i] = rand.nextFloat();
+            input[i] = rand.nextFloat() * 256;
         }
     }
 
@@ -309,6 +309,8 @@ public class MainActivity extends AppCompatActivity {
             weights[i] = ((float)(time - 1) / time * mCpuW[i]) + ((float)1 / time * input[i]);
         }
     }
+
+    public native String getResults();
 
     /**
      * Compute error of a vector of floats relative to another vector of floats

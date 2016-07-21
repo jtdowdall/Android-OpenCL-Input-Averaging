@@ -12,6 +12,8 @@
 #include <android/log.h>
 #include <vector>
 #include <random>
+#include <algorithm>
+#include <chrono>
 #include <ctime>
 #include <cstdlib>
 
@@ -118,12 +120,15 @@ GpuProperties gpu;
 /** Global array that maintains input average for GPU computation. */
 W wGpu;
 
+/** Global array that maintains input average for GPU computation. */
+float *wCpu;
+
 /** Global array of input vector. */
 W inputVector;
 
 /** Global variables to keep track of elapsed time for cpu/gpu functions */
-double cpuTime = 0;
-double gpuTime = 0;
+long long cpuTime = 0;
+long long gpuTime = 0;
 
 /** Global variable keeping track of time iterations for updating weights */
 unsigned int t = 0;
@@ -499,13 +504,11 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
 
     cl_int err;
 
-    wGpu.size = gpu.maxAllocSize / 2 / sizeof(double);
+    wGpu.size = gpu.globalMem / 3 / sizeof(float) / 2;
+    if (gpu.globalMem / 3 > gpu.maxAllocSize) wGpu.size = gpu.maxAllocSize / sizeof(float) / 2;
 
     // If unified memory, allocate memory on host. Otherwise allocate on GPU memory.
     if (gpu.unifiedMem) {
-        // Since global memory is shared with host,
-        // account for memory limit on host as well
-        wGpu.size /= 2;
 
         // Create OpenCL memory buffer for vector w in host memory
         wGpu.buffer = clCreateBuffer
@@ -520,7 +523,14 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
 
         // Create OpenCL memory buffer for input vector in host memory
         inputVector.size = wGpu.size;
-
+        inputVector.buffer = clCreateBuffer
+                (
+                        cl.context,
+                        CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR,
+                        inputVector.size * sizeof(float),
+                        NULL,
+                        &err
+                );
         SAMPLE_CHECK_ERRORS(err);
     }
 
@@ -530,7 +540,7 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
         wGpu.buffer = clCreateBuffer
                 (
                         cl.context,
-                        CL_MEM_WRITE_ONLY,
+                        CL_MEM_READ_WRITE,
                         wGpu.size * sizeof(float),
                         NULL,
                         &err
@@ -549,7 +559,11 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
                 );
     }
 
-    // Fill GPU array with zeros in parallel
+    // Create cpu array
+    wCpu = new float[wGpu.size];
+    std::fill( wCpu, wCpu + wGpu.size, 0 );
+
+    // Fill arrays with zeros in parallel
     cl_kernel fillZero = clCreateKernel(cl.program, "fillZero", &err);
     SAMPLE_CHECK_ERRORS(err);
 
@@ -584,48 +598,9 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
 
 extern "C" JNIEXPORT int
 Java_com_example_jonny_updateweights_MainActivity_updateWeights(JNIEnv *env, jobject instance,
-                                                                   jfloatArray input, jint t) {
+                                                                   jint time)
+{
     cl_int err;
-    // Create buffer for input vector
-
-    //LOGD("%f", inputVector.pointer[0]);
-    inputVector.buffer = clCreateBuffer
-            (
-                    cl.context,
-                    CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR,
-                    inputVector.size * sizeof(jfloat),
-                    NULL,
-                    &err
-            );
-    SAMPLE_CHECK_ERRORS(err);
-    inputVector.pointer = (float*)clEnqueueMapBuffer
-            (
-                    cl.queue, // command_queue
-                    inputVector.buffer, // buffer
-                    true, // blocking_map
-                    CL_MAP_WRITE, // maps_flags
-                    0, // offset
-                    inputVector.size * sizeof(float), // cb
-                    0, // num_events_in_wait_list
-                    NULL, // *event_wait_list
-                    NULL, // *event
-                    &err // *errcode_ret
-            );
-    float  *temp = env->GetFloatArrayElements(input, 0);
-    for (int i = 0; i < inputVector.size; ++i)
-    {
-        inputVector.pointer[i] = temp[i];
-    }
-    SAMPLE_CHECK_ERRORS(err);
-     err = clEnqueueUnmapMemObject
-            (
-                    cl.queue,
-                    inputVector.buffer,
-                    inputVector.pointer,
-                    0,
-                    NULL,
-                    NULL
-            );
     // Set kernel arguments
     err = clSetKernelArg
             (
@@ -641,38 +616,76 @@ Java_com_example_jonny_updateweights_MainActivity_updateWeights(JNIEnv *env, job
                     sizeof(inputVector.buffer),
                     &inputVector.buffer
             );
-    err |= clSetKernelArg
-            (
-                    cl.updateWeights,
-                    2,
-                    sizeof(int),
-                    &t
-            );
-    SAMPLE_CHECK_ERRORS(err);
-
-    // Run kernel
-    size_t globalDimensions[3] = {wGpu.size, 1, 1};
-    err = clEnqueueNDRangeKernel
+    inputVector.pointer = (float *) clEnqueueMapBuffer
             (
                     cl.queue, // command_queue
-                    cl.updateWeights, // kernel
-                    3, // work_dim
-                    NULL, // *global_work_offset
-                    globalDimensions, // *global_work_size
-                    NULL, // *local_work_size
+                    inputVector.buffer, // buffer
+                    true, // blocking_map
+                    CL_MAP_WRITE | CL_MAP_READ, // maps_flags
+                    0, // offset
+                    inputVector.size * sizeof(float), // cb
                     0, // num_events_in_wait_list
                     NULL, // *event_wait_list
-                    NULL // *event
+                    NULL, // *event
+                    &err // *errcode_ret
             );
 
-    SAMPLE_CHECK_ERRORS(err);
+    // Randomize input
+    for (int i = 0; i < inputVector.size; ++i) {
+        inputVector.pointer[i] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+    }
+
+    clEnqueueUnmapMemObject(cl.queue,inputVector.buffer, inputVector.pointer, 0, NULL, NULL);
+
+    // Set time values
+    std::chrono::system_clock::time_point gpuStart, gpuEnd, cpuStart, cpuEnd;
+    for (int t = 1; t <= time; ++t) {
+
+
+        cpuStart = std::chrono::system_clock::now();
+        for (int i = 0; i < wGpu.size; ++i) {
+            wCpu[i] = ((float) (t - 1) / t * wCpu[i]) + ((float) 1 / t * inputVector.pointer[i]);
+        }
+        cpuEnd = std::chrono::system_clock::now();
+        cpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+
+        gpuStart = std::chrono::system_clock::now();
+
+        err = clSetKernelArg
+                (
+                        cl.updateWeights,
+                        2,
+                        sizeof(int),
+                        &t
+                );
+
+        // Run kernel
+        size_t globalDimensions[3] = {wGpu.size, 1, 1};
+        err = clEnqueueNDRangeKernel
+                (
+                        cl.queue, // command_queue
+                        cl.updateWeights, // kernel
+                        3, // work_dim
+                        NULL, // *global_work_offset
+                        globalDimensions, // *global_work_size
+                        NULL, // *local_work_size
+                        0, // num_events_in_wait_list
+                        NULL, // *event_wait_list
+                        NULL // *event
+                );
+        clFinish(cl.queue);
+        gpuEnd = std::chrono::system_clock::now();
+        gpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(gpuEnd - gpuStart).count();
+    }
+    //SAMPLE_CHECK_ERRORS(err);
     err = clReleaseMemObject(inputVector.buffer);
-    SAMPLE_CHECK_ERRORS(err);
+    //SAMPLE_CHECK_ERRORS(err);
+    //env->ReleaseFloatArrayElements(input, temp, JNI_ABORT);
     return 1;
 
 }
 
-extern "C" JNIEXPORT jfloatArray JNICALL
+extern "C" JNIEXPORT void JNICALL
 Java_com_example_jonny_updateweights_MainActivity_getGpuW(JNIEnv *env, jobject instance) {
 
     cl_int err;
@@ -689,18 +702,16 @@ Java_com_example_jonny_updateweights_MainActivity_getGpuW(JNIEnv *env, jobject i
                     NULL, // *event
                     &err // *errcode_ret
             );
-    SAMPLE_CHECK_ERRORS(err);
 
-    jfloatArray result = env->NewFloatArray(wGpu.size);
-    env->SetFloatArrayRegion(result, 0, wGpu.size, wGpu.pointer);
+    //env->ReleaseFloatArrayElements(result,wGpu.pointer, JNI_COMMIT);
 
-    return result;
+    err = clReleaseMemObject(wGpu.buffer);
+
 }
-/*
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobject instance, jfloatArray w) {
 
-    wCpu = env->GetFloatArrayElements(w, 0);
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobject instance) {
+
     cl_int err;
     wGpu.pointer = (float*)clEnqueueMapBuffer
             (
@@ -735,9 +746,9 @@ Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobjec
 
     std::string result;
     result += "Results:\n";
-    result += std::to_string(wGpu.size) + " elements were updated " +
-            std::to_string(t-1) + " time(s) to maintain input averages.\n";
-    result += "\nRuntime reduction: " + std::to_string((double)(1 - gpuTime/cpuTime) * 100) + "%\n";
+    result += "\nCPU Runtime: " + std::to_string(cpuTime);
+    result += "\nGPU Runtime: " + std::to_string(gpuTime);
+    result += "\nRuntime reduction: " + std::to_string((double)(1 - (double)gpuTime/(double)cpuTime) * 100) + "%\n";
     result += "\nGPU relative error to CPU: " +  std::to_string(relativeError*100) + "%";
     result += "\nwCpu[0]: " + std::to_string(wCpu[0]);
     result += "\nwGpu[0]: " + std::to_string(wGpu.pointer[0]);
@@ -745,4 +756,4 @@ Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobjec
     result += "\nwGpu[1]: " + std::to_string(wGpu.pointer[1]);
 
     return env->NewStringUTF(result.c_str());
-}*/
+}
