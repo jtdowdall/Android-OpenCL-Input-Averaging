@@ -133,6 +133,13 @@ long long gpuTime = 0;
 /** Global variable keeping track of time iterations for updating weights */
 unsigned int t = 0;
 
+/** Global flag for timing metrics */
+bool timer = true;
+
+/** Global flag to determine if using GPU and/or CPU */
+bool cpuTesting = true;
+bool gpuTesting = true;
+
 /********************************** Helper Functions ********************************************/
 // Commonly-defined shortcuts for LogCat output from native C applications.
 #define  LOG_TAG    "AndroidBasic"
@@ -505,7 +512,21 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
     cl_int err;
 
     wGpu.size = gpu.globalMem / 3 / sizeof(float) / 2;
-    if (gpu.globalMem / 3 > gpu.maxAllocSize) wGpu.size = gpu.maxAllocSize / sizeof(float) / 2;
+    if (wGpu.size > gpu.maxAllocSize) wGpu.size = gpu.maxAllocSize / sizeof(float) / 2;
+
+    // Check to ensure that input size is not larger than constant buffer max
+    u_long maxBufferSize;
+    err = clGetDeviceInfo
+            (
+                    cl.device,
+                    CL_DEVICE_MAX_MEM_ALLOC_SIZE,
+                    sizeof(gpu.maxAllocSize),
+                    &maxBufferSize,
+                    NULL
+            );
+    SAMPLE_CHECK_ERRORS(err);
+
+    //if (wGpu.size > maxBufferSize / sizeof(float)) wGpu.size = maxBufferSize / sizeof (float);
 
     // If unified memory, allocate memory on host. Otherwise allocate on GPU memory.
     if (gpu.unifiedMem) {
@@ -592,6 +613,27 @@ Java_com_example_jonny_updateweights_MainActivity_initW(JNIEnv *env, jobject ins
             );
     SAMPLE_CHECK_ERRORS(err);
 
+    // Randomize input vector
+    inputVector.pointer = (float *) clEnqueueMapBuffer
+            (
+                    cl.queue, // command_queue
+                    inputVector.buffer, // buffer
+                    true, // blocking_map
+                    CL_MAP_WRITE, // maps_flags
+                    0, // offset
+                    inputVector.size * sizeof(float), // cb
+                    0, // num_events_in_wait_list
+                    NULL, // *event_wait_list
+                    NULL, // *event
+                    &err // *errcode_ret
+            );
+
+    for (int i = 0; i < inputVector.size; ++i) {
+        inputVector.pointer[i] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+    }
+
+    clEnqueueUnmapMemObject(cl.queue,inputVector.buffer, inputVector.pointer, 0, NULL, NULL);
+
     return (int) wGpu.size;
 
 }
@@ -601,81 +643,75 @@ Java_com_example_jonny_updateweights_MainActivity_updateWeights(JNIEnv *env, job
                                                                    jint time)
 {
     cl_int err;
-    // Set kernel arguments
-    err = clSetKernelArg
-            (
-                    cl.updateWeights,
-                    0,
-                    sizeof(wGpu.buffer),
-                    &wGpu.buffer
-            );
-    err |= clSetKernelArg
-            (
-                    cl.updateWeights,
-                    1,
-                    sizeof(inputVector.buffer),
-                    &inputVector.buffer
-            );
-    inputVector.pointer = (float *) clEnqueueMapBuffer
-            (
-                    cl.queue, // command_queue
-                    inputVector.buffer, // buffer
-                    true, // blocking_map
-                    CL_MAP_WRITE | CL_MAP_READ, // maps_flags
-                    0, // offset
-                    inputVector.size * sizeof(float), // cb
-                    0, // num_events_in_wait_list
-                    NULL, // *event_wait_list
-                    NULL, // *event
-                    &err // *errcode_ret
-            );
 
-    // Randomize input
-    for (int i = 0; i < inputVector.size; ++i) {
-        inputVector.pointer[i] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+    if (gpuTesting)
+    {
+        // Set kernel arguments
+        err = clSetKernelArg
+                (
+                        cl.updateWeights,
+                        0,
+                        sizeof(wGpu.buffer),
+                        &wGpu.buffer
+                );
+        err |= clSetKernelArg
+                (
+                        cl.updateWeights,
+                        1,
+                        sizeof(inputVector.buffer),
+                        &inputVector.buffer
+                );
+        SAMPLE_CHECK_ERRORS(err);
     }
-
-    clEnqueueUnmapMemObject(cl.queue,inputVector.buffer, inputVector.pointer, 0, NULL, NULL);
 
     // Set time values
     std::chrono::system_clock::time_point gpuStart, gpuEnd, cpuStart, cpuEnd;
     for (int t = 1; t <= time; ++t) {
 
-
-        cpuStart = std::chrono::system_clock::now();
-        for (int i = 0; i < wGpu.size; ++i) {
-            wCpu[i] = ((float) (t - 1) / t * wCpu[i]) + ((float) 1 / t * inputVector.pointer[i]);
+        if (cpuTesting)
+        {
+            if (timer) cpuStart = std::chrono::system_clock::now();
+            for (int i = 0; i < wGpu.size; ++i) {
+                wCpu[i] =
+                        ((float) (t - 1) / t * wCpu[i]) + ((float) 1 / t * inputVector.pointer[i]);
+            }
+            if (timer) cpuEnd = std::chrono::system_clock::now();
+            if (timer)
+                cpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(
+                        cpuEnd - cpuStart).count();
         }
-        cpuEnd = std::chrono::system_clock::now();
-        cpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
 
-        gpuStart = std::chrono::system_clock::now();
+        if (gpuTesting)
+        {
+            if (timer) gpuStart = std::chrono::system_clock::now();
+            err = clSetKernelArg
+                    (
+                            cl.updateWeights,
+                            2,
+                            sizeof(int),
+                            &t
+                    );
 
-        err = clSetKernelArg
-                (
-                        cl.updateWeights,
-                        2,
-                        sizeof(int),
-                        &t
-                );
-
-        // Run kernel
-        size_t globalDimensions[3] = {wGpu.size, 1, 1};
-        err = clEnqueueNDRangeKernel
-                (
-                        cl.queue, // command_queue
-                        cl.updateWeights, // kernel
-                        3, // work_dim
-                        NULL, // *global_work_offset
-                        globalDimensions, // *global_work_size
-                        NULL, // *local_work_size
-                        0, // num_events_in_wait_list
-                        NULL, // *event_wait_list
-                        NULL // *event
-                );
-        clFinish(cl.queue);
-        gpuEnd = std::chrono::system_clock::now();
-        gpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(gpuEnd - gpuStart).count();
+            // Run kernel
+            size_t globalDimensions[3] = {wGpu.size, 1, 1};
+            err = clEnqueueNDRangeKernel
+                    (
+                            cl.queue, // command_queue
+                            cl.updateWeights, // kernel
+                            3, // work_dim
+                            NULL, // *global_work_offset
+                            globalDimensions, // *global_work_size
+                            NULL, // *local_work_size
+                            0, // num_events_in_wait_list
+                            NULL, // *event_wait_list
+                            NULL // *event
+                    );
+            clFinish(cl.queue);
+            if (timer) gpuEnd = std::chrono::system_clock::now();
+            if (timer)
+                gpuTime += std::chrono::duration_cast<std::chrono::milliseconds>(
+                        gpuEnd - gpuStart).count();
+        }
     }
     //SAMPLE_CHECK_ERRORS(err);
     err = clReleaseMemObject(inputVector.buffer);
@@ -746,9 +782,10 @@ Java_com_example_jonny_updateweights_MainActivity_getResults(JNIEnv *env, jobjec
 
     std::string result;
     result += "Results:\n";
-    result += "\nCPU Runtime: " + std::to_string(cpuTime);
-    result += "\nGPU Runtime: " + std::to_string(gpuTime);
-    result += "\nRuntime reduction: " + std::to_string((double)(1 - (double)gpuTime/(double)cpuTime) * 100) + "%\n";
+    result += std::to_string(wGpu.size) + " elements";
+    result += "\nCPU Runtime: " + std::to_string((double)cpuTime/1000.0) + " s";
+    result += "\nGPU Runtime: " + std::to_string((double)gpuTime/1000.0) + " s";
+    result += "\nGPU " + std::to_string((double)((double)cpuTime/(double)gpuTime)) + "x faster than CPU\n";
     result += "\nGPU relative error to CPU: " +  std::to_string(relativeError*100) + "%";
     result += "\nwCpu[0]: " + std::to_string(wCpu[0]);
     result += "\nwGpu[0]: " + std::to_string(wGpu.pointer[0]);
